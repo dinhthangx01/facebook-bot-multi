@@ -8,6 +8,7 @@ from waitress import serve
 
 load_dotenv()
 app = Flask(__name__)
+
 @app.route('/test', methods=['GET'])
 def test_home():
     return '✅ HeavenBot Multi-Page AI Active with Menu & Smart Modes', 200
@@ -66,7 +67,6 @@ def find_product_link(message, excel_path):
             if desc and link and str(desc).lower() in message.lower():
                 matches.append(f"{desc}: {link}")
         if not matches:
-            # Fuzzy matching (contains keyword)
             for row in ws.iter_rows(min_row=2, values_only=True):
                 desc, link = row
                 if desc and link and any(word in str(desc).lower() for word in message.lower().split()):
@@ -114,6 +114,7 @@ def verify():
         print("❌ Verification failed.")
         return "Verification token mismatch", 403
 
+
 # ====== HANDLE MESSAGES ======
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -123,14 +124,14 @@ def webhook():
         for entry in data.get("entry", []):
             page_id = str(entry.get("id"))
             for event in entry.get("messaging", []):
+
+                # 🟢 Khi người dùng gửi tin nhắn văn bản
                 if "message" in event and "text" in event["message"]:
                     sender_id = event["sender"]["id"]
                     user_msg = event["message"]["text"].strip()
 
-                    # Init memory
                     if sender_id not in MESSAGE_MEMORY:
                         MESSAGE_MEMORY[sender_id] = []
-                        # Send greeting menu
                         send_message(sender_id,
                             "👋 Welcome to HeavenBot!\nPlease choose an option:\n"
                             "1️⃣ Chat with us\n"
@@ -161,17 +162,26 @@ def webhook():
                         reply = generate_reply(user_msg, config["gemini"], AI_COMMANDS.get(mode, {}).get("prompt", ""))
 
                     send_message(sender_id, reply, page_id)
+
+                # 🟡 Khi người dùng gửi ảnh (image attachments)
+                elif "message" in event and "attachments" in event["message"]:
+                    sender_id = event["sender"]["id"]
+                    for attachment in event["message"]["attachments"]:
+                        if attachment.get("type") == "image":
+                            image_url = attachment["payload"]["url"]
+                            send_message(sender_id,
+                                f"📸 I received your photo!\nWe'll create your Heaven-style image soon 🌤️\n(Link: {image_url})",
+                                page_id)
     return "OK", 200
+
 
 @app.route("/", methods=["GET"])
 def home():
     return "✅ HeavenBot Multi-Page AI Active with Menu & Smart Modes"
 
+
 # ====== RUN SERVER ======
 if __name__ == '__main__':
-    from waitress import serve
-    import os
-
     port = int(os.environ.get('PORT', 10000))
     print(f"🚀 Webhook server starting on port {port} ...")
     serve(app, host='0.0.0.0', port=port)
