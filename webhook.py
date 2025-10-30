@@ -2,24 +2,27 @@ from flask import Flask, request
 import requests, os
 from dotenv import load_dotenv
 from openpyxl import load_workbook
-from langdetect import detect
+from langdetect import detect, DetectorFactory
 import google.generativeai as genai
 from waitress import serve
 
 # =========================
 # INITIAL SETUP
 # =========================
-load_dotenv()
 app = Flask(__name__)
-
+load_dotenv()
 VERIFY_TOKEN = "123abc"
+
+DetectorFactory.seed = 0
+
+# =========================
+# LOAD EXCEL CONFIG
+# =========================
 PAGE_CONFIG = {}
 AI_COMMANDS = {}
 
-# =========================
-# LOAD CONFIG FROM EXCEL
-# =========================
 def load_page_config():
+    """Load page info: page_id, token, gemini key, store link"""
     wb = load_workbook("pages_config.xlsx", read_only=True)
     ws = wb.active
     for row in ws.iter_rows(min_row=2, values_only=True):
@@ -31,23 +34,39 @@ def load_page_config():
                 "store": store_link
             }
 
+def load_ai_commands():
+    """Load AI command triggers from ai_commands.xlsx"""
+    wb = load_workbook("ai_commands.xlsx", read_only=True)
+    ws = wb.active
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        mode_key, trigger_keywords, action_desc, ai_prompt = row
+        if trigger_keywords:
+            keywords = [k.strip().lower() for k in trigger_keywords.split(",")]
+            AI_COMMANDS[mode_key] = {
+                "keywords": keywords,
+                "prompt": ai_prompt
+            }
+
 load_page_config()
+load_ai_commands()
 
 # =========================
-# LIST OF TRIGGERS (mua hàng)
+# LANGUAGE DETECTION FIX
 # =========================
-BUY_KEYWORDS = [
-    # lower
-    "buy", "purchase", "order", "shop", "shopping", "store", "gift", "shirt", "tshirt", "hoodie",
-    "buy something", "want to buy", "buy a product", "buy product", "i want to order",
-    "link shop", "link store", "t-shirt", "product", "item", "merch", "sale",
-    "clothes", "apparel", "quote", "heaven gift", "heaven store", "heaven shirt",
-    # upper and title case
-    "Buy", "Purchase", "Order", "Shop", "Shopping", "Store", "Gift", "Shirt", "Tshirt", "Hoodie",
-    "Buy something", "Want to buy", "Buy a product", "Buy product", "I want to order",
-    "Link shop", "Link store", "T-Shirt", "Product", "Item", "Merch", "Sale",
-    "Clothes", "Apparel", "Quote", "Heaven Gift", "Heaven Store", "Heaven Shirt"
-]
+def detect_language_safe(text):
+    try:
+        # nếu quá ngắn, mặc định English
+        if len(text.strip()) < 5:
+            return "en"
+        lang = detect(text)
+        # tránh lỗi nhận Finnish khi người dùng nói tiếng Anh
+        if lang not in ["en", "vi", "es", "fr", "de", "pt", "it"]:
+            return "en"
+        if text.lower().startswith("i miss"):
+            return "en"
+        return lang
+    except:
+        return "en"
 
 # =========================
 # SEND MESSAGE FUNCTION
@@ -65,38 +84,41 @@ def send_message(recipient_id, text, page_id):
 # DETECT MODE
 # =========================
 def detect_mode(message):
-    for keyword in BUY_KEYWORDS:
-        if keyword in message:
-            return "buy"
-    return "chat"
+    msg = message.lower()
+    for mode, data in AI_COMMANDS.items():
+        for kw in data["keywords"]:
+            if kw in msg:
+                return mode
+    return "chat_mode"
 
 # =========================
-# GEMINI GENERATION
+# GENERATE AI RESPONSE
 # =========================
-def generate_reply(message, api_key, role="chat"):
+def generate_reply(message, api_key, role="chat_mode"):
     try:
         genai.configure(api_key=api_key)
-        lang = detect(message)
         model = genai.GenerativeModel("gemini-2.0-flash")
 
-        if role == "chat":
+        lang = detect_language_safe(message)
+
+        if role == "buy_product":
             system_prompt = (
-                "You are a compassionate Heaven psychologist assistant. "
-                "Speak softly, kindly, and comfort people who miss their loved ones. "
-                "Use emotional intelligence and reply in the same language as user. "
-                "Avoid sales talk unless user asks about store or product."
+                "You are a Heaven Store sales assistant. "
+                "Speak warmly and naturally. If the user asks about products, "
+                "send the Heaven Store link politely. "
+                "Always reply in the same language as user."
             )
         else:
             system_prompt = (
-                "You are a Heaven Store sales assistant. Be warm, kind and friendly. "
-                "If asked about products, explain briefly and direct the user to the Heaven store. "
+                "You are a compassionate Heaven psychologist assistant. "
+                "Speak softly, kindly, and comfort those who miss loved ones. "
+                "Use empathy and emotional intelligence. "
                 "Always reply in the same language as user."
             )
 
-        full_prompt = f"{system_prompt}\n\nUser message: {message}\nLanguage: {lang}"
-        response = model.generate_content(full_prompt)
-        return response.text.strip()
-
+        prompt = f"{system_prompt}\nUser message: {message}\nLanguage: {lang}"
+        response = model.generate_content(prompt)
+        return response.text.strip() if response.text else "..."
     except Exception as e:
         print("⚠️ Gemini error:", e)
         return "Sorry, I'm having trouble replying right now."
@@ -109,6 +131,7 @@ def verify():
     mode = request.args.get("hub.mode")
     token = request.args.get("hub.verify_token")
     challenge = request.args.get("hub.challenge")
+
     if mode == "subscribe" and token == VERIFY_TOKEN:
         print("✅ Webhook verified successfully!")
         return challenge, 200
@@ -131,25 +154,26 @@ def webhook():
                     message = event["message"]["text"].strip()
 
                     mode = detect_mode(message)
-                    config = PAGE_CONFIG[page_id]
-                    gemini_key = config["gemini"]
+                    config = PAGE_CONFIG.get(page_id, {})
+                    gemini_key = config.get("gemini")
 
-                    # ---- Nếu là mua hàng ----
-                    if mode == "buy":
+                    # --- Nếu là yêu cầu mua hàng ---
+                    if mode == "buy_product":
                         store_link = config.get("store", "")
                         if store_link:
                             reply = (
-                                f"🛒 You can explore Heaven products here:\n"
+                                f"🛒 You can explore our Heaven Store here:\n"
                                 f"{store_link}\n\n"
-                                "Would you like me to suggest a few beautiful memorial gifts?"
+                                "Would you like me to show some memorial gifts?"
                             )
                         else:
-                            reply = "🛍️ Our Heaven store link is not configured yet."
+                            reply = "Our store link isn’t configured yet."
                     else:
-                        # ---- Nếu là trò chuyện ----
-                        reply = generate_reply(message, gemini_key, role="chat")
+                        # --- Tâm lý Heaven mode ---
+                        reply = generate_reply(message, gemini_key, role="chat_mode")
 
                     send_message(sender_id, reply, page_id)
+
     return "OK", 200
 
 # =========================
@@ -157,12 +181,12 @@ def webhook():
 # =========================
 @app.route("/", methods=["GET"])
 def home():
-    return "✅ HeavenBot Active – Comfort & Sales AI Ready", 200
+    return "✅ HeavenBot is active and ready.", 200
 
 # =========================
 # START SERVER
 # =========================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    print(f"🚀 Webhook running on port {port}")
+    print(f"🚀 HeavenBot running on port {port}")
     serve(app, host="0.0.0.0", port=port)
