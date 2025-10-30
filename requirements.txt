@@ -1,0 +1,7 @@
+flask
+waitress
+requests
+python-dotenv
+openpyxl
+langdetect
+google-generativeai
